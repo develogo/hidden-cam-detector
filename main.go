@@ -5,6 +5,7 @@ package main
 import (
 	"embed"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -15,10 +16,19 @@ import (
 //go:embed web
 var webFiles embed.FS
 
+// version is set at build time by the release workflow (-ldflags "-X main.version=...").
+var version = "dev"
+
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8765", "web UI address (use 0.0.0.0:8765 to access it from another device)")
 	noBrowser := flag.Bool("no-browser", false, "do not open the browser automatically")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
+	log.Printf("hidden-cam-detector %s", version)
 
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
