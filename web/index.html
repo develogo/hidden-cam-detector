@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hidden Cam Detector</title>
+<style>
+  :root { color-scheme: dark; --bg:#111418; --card:#1a1f25; --line:#2a313a; --txt:#e6e9ec; --dim:#8a96a3;
+          --red:#ff5d5d; --yellow:#f2c14e; --green:#5fd08a; --blue:#5aa9ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--txt); }
+  main { max-width:1100px; margin:0 auto; padding:24px 16px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  p.sub { margin:0 0 20px; color:var(--dim); }
+  .bar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  button, a.btn { background:var(--blue); color:#06121f; border:0; border-radius:8px; padding:10px 18px;
+                  font-weight:600; font-size:15px; cursor:pointer; text-decoration:none; }
+  button:disabled { opacity:.5; cursor:default; }
+  a.btn.secondary { background:var(--card); color:var(--txt); border:1px solid var(--line); }
+  button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
+  #status { color:var(--dim); }
+  progress { width:180px; }
+  details { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px 14px; margin-bottom:16px; }
+  summary { cursor:pointer; font-weight:600; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; margin-top:12px; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--dim); }
+  input { background:var(--bg); color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:8px; font-size:15px; }
+  .summary { display:flex; gap:10px; margin-bottom:12px; flex-wrap:wrap; }
+  .pill { padding:4px 10px; border-radius:999px; font-size:13px; font-weight:600; white-space:nowrap; }
+  .likely { background:#3a1717; color:var(--red); }
+  .possible { background:#3a3017; color:var(--yellow); }
+  .unlikely { background:#173a25; color:var(--green); }
+  table { width:100%; border-collapse:collapse; background:var(--card); border-radius:8px; overflow:hidden; }
+  th, td { text-align:left; padding:10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:13px; color:var(--dim); font-weight:600; }
+  td.mono { font-family:ui-monospace, monospace; font-size:13px; }
+  ul.ev { margin:0; padding-left:18px; }
+  ul.ev li.strong { color:var(--red); }
+  .muted { color:var(--dim); }
+  #error { color:var(--red); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Hidden Cam Detector</h1>
+  <p class="sub">Finds IP cameras, DVRs and NVRs on the local network. Detection only: never opens video or attempts a login.</p>
+
+  <div class="bar">
+    <button id="scan">Scan</button>
+    <progress id="progress" max="1" value="0" hidden></progress>
+    <span id="status" role="status" aria-live="polite">Ready</span>
+    <a class="btn secondary" href="/api/devices" download="hidden-cam-scan.json">Export JSON</a>
+  </div>
+  <p id="error" role="alert"></p>
+
+  <details>
+    <summary>Settings</summary>
+    <div class="grid">
+      <label>Subnet (CIDR)<input id="subnet" placeholder="192.168.0.0/24"></label>
+      <label>Extra ports (comma-separated)<input id="extra" placeholder="e.g. 9000, 10554"></label>
+      <label>Connection timeout (ms)<input id="timeout" type="number" min="100" max="5000" step="100"></label>
+    </div>
+    <p class="muted" id="ports"></p>
+  </details>
+
+  <div class="summary" id="counts"></div>
+  <table>
+    <thead><tr><th>Verdict</th><th>IP</th><th>MAC / vendor</th><th>Open ports</th><th>Evidence</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="5" class="muted">Click Scan to start.</td></tr></tbody>
+  </table>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+
+// The server sends the full state, already sorted and labeled; this only renders it.
+// Everything from devices goes through textContent so a malicious banner cannot inject HTML.
+function render({ status: st, summary, devices }) {
+  $('scan').disabled = st.running;
+  const p = $('progress');
+  p.hidden = !st.running;
+  p.max = st.total || 1; p.value = st.done;
+  let txt = st.phaseLabel;
+  if (st.phase === 'sweep' && st.total) txt += ` (${Math.round(100 * st.done / st.total)}%)`;
+  if (st.subnet) txt += ` — ${st.subnet}`;
+  $('status').textContent = txt;
+  if (st.error) $('error').textContent = st.error;
+
+  const rows = devices.map(d => {
+    const tr = el('tr');
+    const v = el('td'); v.append(el('span', 'pill ' + d.verdict, d.verdictLabel)); tr.append(v);
+    tr.append(el('td', 'mono', d.ip));
+    const mac = el('td', 'mono', d.mac || '—');
+    if (d.vendor) mac.append(el('br'), el('span', 'muted', d.vendor));
+    tr.append(mac);
+    tr.append(el('td', 'mono', d.ports.length ? d.ports.join(', ') : '—'));
+    const ev = el('td');
+    if (d.evidence.length) {
+      const ul = el('ul', 'ev');
+      d.evidence.forEach(e => ul.append(el('li', e.weight, `[${e.source}] ${e.detail}`)));
+      ev.append(ul);
+    } else ev.append(el('span', 'muted', 'no camera signal'));
+    tr.append(ev);
+    return tr;
+  });
+  if (!rows.length) {
+    const td = el('td', 'muted', st.phase === 'idle' ? 'Click Scan to start.' : 'No devices found yet.');
+    td.colSpan = 5; const tr = el('tr'); tr.append(td); rows.push(tr);
+  }
+  $('rows').replaceChildren(...rows);
+  $('counts').replaceChildren(...summary.map(c => el('span', 'pill ' + c.verdict, `${c.count} ${c.label.toLowerCase()}`)));
+}
+
+new EventSource('/api/events').addEventListener('state', e => render(JSON.parse(e.data)));
+
+async function errorText(r) {
+  const body = await r.text();
+  try { return JSON.parse(body).error || body; } catch { return body || `error ${r.status}`; }
+}
+
+fetch('/api/config').then(r => r.json()).then(c => {
+  $('subnet').value = c.subnet;
+  $('timeout').value = c.timeoutMs;
+  $('ports').textContent = 'Default ports: ' + c.defaultPorts.join(', ');
+  if (!c.subnet) $('error').textContent = 'Could not detect the subnet; set it in Settings.';
+});
+
+$('scan').addEventListener('click', async () => {
+  $('error').textContent = '';
+  const raw = $('extra').value.split(',').map(s => s.trim()).filter(Boolean);
+  const bad = raw.find(s => !/^\d+$/.test(s));
+  if (bad !== undefined) { $('error').textContent = `Invalid extra port: "${bad}"`; return; }
+  const r = await fetch('/api/scan', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subnet: $('subnet').value, extraPorts: raw.map(Number), timeoutMs: Number($('timeout').value) }),
+  });
+  if (!r.ok) $('error').textContent = await errorText(r);
+});
+</script>
+</body>
+</html>
